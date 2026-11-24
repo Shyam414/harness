@@ -350,9 +350,11 @@ class Agent:
                     action_retry_count += 1
                     instruction = (
                         "The previous filesystem tool call failed, so the requested change is still incomplete. "
-                        "Use the tool result to correct the problem and call a filesystem tool now. "
-                        "If replacing an entire file, use fs_write with the complete intended contents; use fs_edit "
-                        "only when the exact old text is known. Do not claim success until a tool result confirms it."
+                        "Read the exact error and correct both the workspace-relative path and tool arguments. "
+                        "If the target file exists, use fs_read before editing it. If replacing or repairing a whole "
+                        "file, use fs_write with the complete intended contents, excluding Markdown fence lines; use "
+                        "fs_edit only when the exact old text is known. Do not send a plan or claim success: call the "
+                        "appropriate filesystem tool now, then report completion only after its successful result."
                     )
                     self.context.add(Message(role="user", content=instruction))
                     continue
