@@ -28,14 +28,27 @@ agent "Create a simple static website in site/index.html, then serve the site fo
 
 The agent can use `terminal_start` to run `python -m http.server 8000` from `site`, then open `http://localhost:8000` in a browser. The server runs independently of the agent session; ask the agent to stop it using the PID it returned, or stop it manually from your operating system.
 
-On startup the harness reads `.env` from the current folder (see `.env.example`), starts Ollama if it is not running, and pulls the model if it is missing.
+On startup the harness reads `.env` from the current folder, falling back to the harness installation folder when the current folder has no `.env`. Ollama remains the default provider; it starts Ollama if needed and pulls the selected model if it is missing. Choose `huggingface` or `groq` with `MODEL_PROVIDER` to use their hosted chat APIs instead.
 
 ```env
+MODEL_PROVIDER=ollama
 OLLAMA_MODEL=qwen2.5:3b
 # OLLAMA_HOST=http://127.0.0.1:11434
+
+# Hugging Face Inference Providers
+# MODEL_PROVIDER=huggingface
+# HF_MODEL=provider/model-name
+# HF_TOKEN=your-hugging-face-access-token
+
+# Groq
+# MODEL_PROVIDER=groq
+# GROQ_MODEL=openai/gpt-oss-20b
+# GROQ_API_KEY=your-groq-api-key
 ```
 
-Existing shell environment variables take precedence over `.env`.
+`MODEL_NAME` can select a model for any provider. `HF_MODEL` and `GROQ_MODEL` are provider-specific alternatives. Set `HF_TOKEN` or `GROQ_API_KEY` for the matching hosted provider. The application reads these values directly from `.env`; process environment variables are not used. Provider selection is centralized in `models/provider.py`. Free usage, model availability, and rate limits depend on the provider's current account plan; a model ID alone does not guarantee free access.
+
+The Hugging Face adapter uses `https://router.huggingface.co/v1/chat/completions`; the Groq adapter uses `https://api.groq.com/openai/v1/chat/completions`. Both support the harness's standard chat and function-tool request format.
 
 ## Tools
 
@@ -65,7 +78,7 @@ Paths are relative to the workspace (the folder you run `agent` in, or `--worksp
 
 ## Architecture
 
-- `models` : provider-neutral messages and the Ollama adapter (server start, model pull, native tool calling)
+- `models` : provider-neutral messages and adapters for Ollama, Hugging Face Inference Providers, and Groq
 - `core` : the agent loop and the dynamic tool registry
 - `runtime` : owns the workspace folder and resolves paths
 - `tools` : filesystem tools
@@ -76,8 +89,8 @@ Every tool schema is sent to the model, arguments are validated before dispatch,
 
 ## Options
 
-`--workspace`, `--sessions`, `--session`, `--model`, `--host`, `--max-turns` (default 40), `--verbose`.
-Environment: `OLLAMA_HOST`, `OLLAMA_MODEL`, `HARNESS_WORKSPACE`, `HARNESS_SESSION_DIR`, `HARNESS_MAX_TURNS`.
+`--workspace`, `--sessions`, `--session`, `--host`, `--max-turns` (default 40), `--verbose`.
+Environment in `.env`: `MODEL_PROVIDER`, `MODEL_NAME`, `OLLAMA_MODEL`, `HF_MODEL`, `GROQ_MODEL`, provider tokens, `OLLAMA_HOST`, `HARNESS_WORKSPACE`, `HARNESS_SESSION_DIR`, `HARNESS_MAX_TURNS`.
 
 The agent detects whether it was launched from PowerShell, CMD, or Git Bash and uses that shell for terminal tools. On Windows, curl commands always open in Git Bash. Set `HARNESS_SHELL` to `powershell`, `cmd`, or `git-bash` to override detection, or set `HARNESS_GIT_BASH` to the full path of `bash.exe` if Git Bash is not discoverable through Git for Windows' default locations.
 

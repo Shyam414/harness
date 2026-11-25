@@ -4,9 +4,8 @@ import argparse
 import asyncio
 import json
 import logging
-import os
 from pathlib import Path
-
+from dotenv import dotenv_values
 from prompt_toolkit import PromptSession
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.keys import Keys
@@ -15,27 +14,24 @@ from context.manager import ContextManager
 from core.agent import Agent
 from core.registry import ToolRegistry
 from models.base import Message, ProviderError
-from models.ollama import OllamaProvider
+from models.provider import create_provider
 from runtime.manager import RuntimeManager
 from tools.filesystem import register_filesystem
 from tools.git import register_git
 from tools.terminal import register_terminal
 
 
-def _load_dotenv(path: Path = Path(".env")) -> None:
-    """Load simple KEY=VALUE entries without overriding existing environment values."""
-    if not path.is_file():
-        return
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key, value = key.strip(), value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-            value = value[1:-1]
-        if key:
-            os.environ.setdefault(key, value)
+def _load_dotenv(path: Path | None = None) -> dict[str, str]:
+    """Read the launch folder's .env, falling back to the installed harness root."""
+    if path is None:
+        path = Path(".env")
+        if not path.is_file():
+            path = Path(__file__).resolve().parent.parent / ".env"
+    return {
+        key: value
+        for key, value in dotenv_values(path, encoding="utf-8").items()
+        if key and value is not None
+    }
 
 
 def _clip(text: str, limit: int = 200) -> str:
@@ -121,16 +117,29 @@ async def _chat(args) -> None:
     else:
         context.messages[existing] = system_message
 
-    provider = OllamaProvider(args.model, args.host)
-    await provider.ensure_model()
-    capabilities = (await provider.model_info()).get("capabilities", [])
-    if "tools" not in capabilities:
-        logging.getLogger("agent").warning("model=%s does not advertise native tool calling; file creation may not work", args.model)
+    settings = args.settings
+    provider_name = str(settings.get("MODEL_PROVIDER") or "ollama").strip().lower()
+    provider_model_env = "HF_MODEL" if provider_name == "huggingface" else f"{provider_name.upper()}_MODEL"
+    model = settings.get("MODEL_NAME") or settings.get(provider_model_env)
+    if provider_name == "ollama":
+        model = model or "qwen2.5:3b"
+    elif not model:
+        model_variable = "HF_MODEL" if provider_name == "huggingface" else f"{provider_name.upper()}_MODEL"
+        raise ProviderError(f"Set MODEL_NAME or {model_variable} in .env to select a model.")
+    provider = create_provider(provider_name, model, settings, args.host)
+    ensure_model = getattr(provider, "ensure_model", None)
+    if ensure_model:
+        await ensure_model()
+        model_info = getattr(provider, "model_info", None)
+        if model_info:
+            capabilities = (await model_info()).get("capabilities", [])
+            if "tools" not in capabilities:
+                logging.getLogger("agent").warning("model=%s does not advertise native tool calling; file creation may not work", model)
 
     agent = Agent(provider, registry, context, max_turns=args.max_turns, on_event=_event)
     curl_shell = runtime.shell_info().get("curl_shell")
     curl_label = f" | curl: {curl_shell}" if curl_shell else ""
-    print(f"Local coding agent | model: {args.model} | shell: {runtime.shell_name}{curl_label} | workspace: {workspace}")
+    print(f"Local coding agent | provider: {provider_name} | model: {model} | shell: {runtime.shell_name}{curl_label} | workspace: {workspace}")
 
     async def run_prompt(prompt: str) -> None:
         result = await agent.run(prompt)
@@ -172,17 +181,17 @@ async def _chat(args) -> None:
 
 
 def main() -> None:
-    _load_dotenv()
+    settings = _load_dotenv()
     parser = argparse.ArgumentParser(description="Local AI agent harness (file and folder creation/update)")
     parser.add_argument("prompt", nargs="*", help="optional one-shot task; omit for an interactive session")
-    parser.add_argument("--workspace", default=os.getenv("HARNESS_WORKSPACE", "."))
-    parser.add_argument("--sessions", default=os.getenv("HARNESS_SESSION_DIR", ".harness/sessions"))
+    parser.add_argument("--workspace", default=settings.get("HARNESS_WORKSPACE", "."))
+    parser.add_argument("--sessions", default=settings.get("HARNESS_SESSION_DIR", ".harness/sessions"))
     parser.add_argument("--session", default="default")
-    parser.add_argument("--model", default=os.getenv("OLLAMA_MODEL", "qwen2.5:3b"))
-    parser.add_argument("--host", default=os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434"))
-    parser.add_argument("--max-turns", type=int, default=int(os.getenv("HARNESS_MAX_TURNS", "40")), help="maximum model/tool rounds per task")
+    parser.add_argument("--host", default=None, help="provider API host override")
+    parser.add_argument("--max-turns", type=int, default=int(settings.get("HARNESS_MAX_TURNS", "40")), help="maximum model/tool rounds per task")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
+    args.settings = settings
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.WARNING, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     try:
         asyncio.run(_chat(args))

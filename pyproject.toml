@@ -7,7 +7,7 @@ name = "local-agent-harness"
 version = "0.2.0"
 description = "A local AI agent harness that creates and updates files and folders"
 requires-python = ">=3.10"
-dependencies = ["httpx>=0.25", "pydantic>=2.5", "psutil>=5.9", "prompt-toolkit>=3.0"]
+dependencies = ["httpx>=0.25", "pydantic>=2.5", "psutil>=5.9", "prompt-toolkit>=3.0", "python-dotenv>=1.0"]
 
 [project.optional-dependencies]
 dev = ["pytest>=7", "pytest-asyncio>=0.21", "ruff>=0.3"]
