@@ -14,7 +14,7 @@ cd C:\path\to\your\project
 agent
 ```
 
-Type your task at `You>` (for example `Create a todo app with a Flask backend and an HTML/JS frontend`). `/exit` ends the session. You can also run a single task: `agent "create a portfolio website"`.
+Type your task at `You>` (for example `Create a todo app with a Flask backend and an HTML/JS frontend`). Pasted text stays in the prompt as a draft; add or edit text as needed, then press Enter to submit the complete message, including pasted line breaks. `/exit` ends the session. You can also run a single task: `agent "create a portfolio website"`.
 
 To use `agent` in any terminal without activating a venv, run `pip install -e .` once with your global Python (or use `pipx install -e .`).
 

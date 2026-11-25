@@ -20,7 +20,7 @@ log = logging.getLogger("harness.agent")
 # "folder" often appear in questions and must not enable tools by themselves.
 _ACTION_INTENT = re.compile(
     r"^\s*(?:(?:please|now|hey|can\s+(?:you|u)|could you|would you|i want you to)\s+){0,3}"
-    r"(?:make|build|crea(?:t?e|ted|ting)|generate|scaffold|write|add|edit|update|change|modify|fix|save|delete|remove|set\s+up|setup)\b",
+    r"(?:make|build|crea(?:t?e|ted|ting)|crete|generate|scaffold|write|add|edit|update|change|modify|fix|save|delete|remove|set\s+up|setup)\b",
     re.IGNORECASE,
 )
 # Users often state the diagnostic request first and the requested change later
@@ -28,8 +28,10 @@ _ACTION_INTENT = re.compile(
 # above intentionally avoids treating questions as authorization, so recognize
 # explicit change-verb + workspace-object phrases anywhere in the prompt too.
 _EXPLICIT_CHANGE_INTENT = re.compile(
-    r"\b(?:write|add|edit|update|change|modify|fix|save|delete|remove)\s+"
-    r"(?:the\s+)?(?:codes?|files?|scripts?|app(?:lication)?|project|workspace|folder|directory)\b",
+    r"\b(?:write|add|edit|update|change|modify|fix|save|delete|remove|create|crete|build|scaffold|generate)\s+"
+    r"(?:(?:the|a|an|new|these|those)\s+)?"
+    r"(?:codes?|files?|scripts?|apps?|applications?|systems?|projects?|workspaces?|folders?|directories|"
+    r"websites?|pages?|components?|features?|models?|routes?|apis?)\b",
     re.IGNORECASE,
 )
 _INSPECT_INTENT = re.compile(

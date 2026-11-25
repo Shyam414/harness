@@ -7,6 +7,10 @@ import logging
 import os
 from pathlib import Path
 
+from prompt_toolkit import PromptSession
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.keys import Keys
+
 from context.manager import ContextManager
 from core.agent import Agent
 from core.registry import ToolRegistry
@@ -139,11 +143,25 @@ async def _chat(args) -> None:
             await run_prompt(" ".join(args.prompt))
             return
         print("Describe what to create or change, or type /exit to quit.\n")
+        # Pasting inserts the complete clipboard payload into the prompt buffer.
+        # It does not submit: Enter submits the full draft, including pasted
+        # lines and any additional text typed afterward.
+        bindings = KeyBindings()
+
+        @bindings.add(Keys.BracketedPaste, eager=True)
+        def _insert_paste(event) -> None:
+            paste_data = event.key_sequence[0].data or ""
+            event.current_buffer.insert_text(paste_data)
+
+        prompt_session = PromptSession(multiline=False, key_bindings=bindings)
         while True:
             try:
-                prompt = input("You> ").strip()
+                prompt = (await prompt_session.prompt_async("You> ")).strip()
             except EOFError:
                 break
+            except KeyboardInterrupt:
+                print("\nInput cancelled.")
+                continue
             if prompt.lower() in ("/exit", "/quit", "exit", "quit"):
                 break
             if prompt:
