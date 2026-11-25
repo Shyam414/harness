@@ -1,191 +1,36 @@
 from __future__ import annotations
 
 import asyncio
-import ast
 import json
 import logging
 import random
-import re
-import shlex
 from dataclasses import dataclass
 from typing import Callable
 
 from context.manager import ContextManager
 from models.base import ChatProvider, Message, ToolCall
 from .registry import ToolRegistry
+from .intents import (
+    ACTION_INTENT,
+    CURL_REQUEST_INTENT,
+    EXPLICIT_CHANGE_INTENT,
+    INSPECT_INTENT,
+    PATH_INTENT,
+    PROCESS_LIST_INTENT,
+    PROCESS_STOP_INTENT,
+    RUN_CONFIRMATION,
+    RUN_FILE_INTENT,
+    RUN_INTENT,
+    VISIBLE_TERMINAL_INTENT,
+)
+from .request_parsing import (
+    curl_login_command,
+    explicit_read_invocation,
+    proposed_terminal_command,
+    redact_sensitive_text,
+)
 
 log = logging.getLogger("harness.agent")
-
-# Only action verbs indicate a workspace change request. Words like "file" or
-# "folder" often appear in questions and must not enable tools by themselves.
-_ACTION_INTENT = re.compile(
-    r"^\s*(?:(?:please|now|hey|can\s+(?:you|u)|could you|would you|i want you to)\s+){0,3}"
-    r"(?:make|build|crea(?:t?e|ted|ting)|crete|generate|scaffold|write|add|edit|update|change|modify|fix|save|delete|remove|set\s+up|setup)\b",
-    re.IGNORECASE,
-)
-# Users often state the diagnostic request first and the requested change later
-# (for example, "see why X fails and update the code"). The anchored matcher
-# above intentionally avoids treating questions as authorization, so recognize
-# explicit change-verb + workspace-object phrases anywhere in the prompt too.
-_EXPLICIT_CHANGE_INTENT = re.compile(
-    r"\b(?:write|add|edit|update|change|modify|fix|save|delete|remove|create|crete|build|scaffold|generate)\s+"
-    r"(?:(?:the|a|an|new|these|those)\s+)?"
-    r"(?:codes?|files?|scripts?|apps?|applications?|systems?|projects?|workspaces?|folders?|directories|"
-    r"websites?|pages?|components?|features?|models?|routes?|apis?)\b",
-    re.IGNORECASE,
-)
-_INSPECT_INTENT = re.compile(
-    r"\b(list|show|see|view|display|what(?:'s| is)?|which|find)\b.{0,120}\b(files?|folders?|directories|contents?)\b"
-    r"|\b(files?|folders?|directories)\b.{0,120}\b(list|show|see|view|display|there|inside|in this)\b"
-    r"|\b(path|location)\b.{0,100}\b(file|folder|directory|current|this)\b"
-    r"|\b(file|folder|directory|current)\b.{0,100}\b(path|location)\b",
-    re.IGNORECASE,
-)
-_RUN_INTENT = re.compile(
-    r"^\s*(?:(?:please|now|can\s+(?:you|u)|could you|would you)\s+){0,3}"
-    r"(?:run|execute|launch|start)\b|\b(run|execute)\s+(?:it|this|that|the\s+\S+)",
-    re.IGNORECASE,
-)
-_VISIBLE_TERMINAL_INTENT = re.compile(
-    r"\b(?:open|launch|use)\b.{0,60}\b(?:another|separate|new|visible)?\s*terminal\b"
-    r"|\b(?:in|from)\s+(?:the\s+)?(?:other|another|separate|new)\s+terminal\b"
-    r"|\bterminal\s+window\b",
-    re.IGNORECASE,
-)
-_RUN_FILE_INTENT = re.compile(
-    r"\b(?:run|execute|launch|start)\b.{0,80}\b[\w./\\-]+\.(?:py|js|ts|sh|bat|cmd|ps1|exe)\b",
-    re.IGNORECASE,
-)
-_PATH_INTENT = re.compile(r"\b(path|location)\b", re.IGNORECASE)
-_PROCESS_LIST_INTENT = re.compile(
-    r"\b(?:list|show|see|check|what(?:'s|\s+is)?|which|find)\b.{0,120}"
-    r"\b(?:running|active|started)\b.{0,50}\b(?:process(?:es)?|apps?|servers?|commands?)\b"
-    r"|\bwhat(?:'s|\s+is)?\s+running\b.{0,80}\b(?:folder|directory|workspace|here)\b"
-    r"|\b(?:process(?:es)?|apps?|servers?)\b.{0,80}\b(?:running|active)\b",
-    re.IGNORECASE,
-)
-_PROCESS_STOP_INTENT = re.compile(
-    r"^\s*(?:(?:please|now|can\s+(?:you|u)|could you|would you)\s+){0,3}"
-    r"(?:stop|kill|terminate)\s+(?:(?:the|this|that|running)\s+){0,2}"
-    r"(?:process|app|server|script|pid)\b",
-    re.IGNORECASE,
-)
-_CURL_REQUEST_INTENT = re.compile(
-    r"\b(?:use|run|execute|send|fetch|get)\b.{0,100}\b(?:curl|endpoint|api\s+request)\b",
-    re.IGNORECASE,
-)
-_RUN_CONFIRMATION = re.compile(
-    r"^\s*(?:yes|yeah|yep|sure|okay|ok|please|go ahead|proceed)(?:\s*[,!.]?\s*(?:run it|do it|proceed|go ahead|execute it))?\s*[!.]?\s*$",
-    re.IGNORECASE,
-)
-
-
-def _redact_sensitive_text(text: str) -> str:
-    """Mask credential values before persisting prompts or synthetic tool calls."""
-    text = re.sub(
-        r'(?i)((?:"|\b)(?:password|token|secret|api[_-]?key)(?:"|\b)\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|\S+)',
-        r"\1[redacted]",
-        text,
-    )
-    return re.sub(r"(?i)(--?(?:password|token|secret|api[-_]?key)\s+)\S+", r"\1[redacted]", text)
-
-
-def _curl_login_command(prompt: str) -> str | None:
-    """Build a Bash-safe curl login command from an explicit URL/email/password request."""
-    url_match = re.search(r"https?://[^\s\"'<>]+", prompt, re.IGNORECASE)
-    email_match = re.search(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", prompt, re.IGNORECASE)
-    password_match = re.search(
-        r"\bpassword\s*[:=]\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s,;]+))",
-        prompt,
-        re.IGNORECASE,
-    )
-    if not (url_match and email_match and password_match):
-        return None
-    url = url_match.group(0).rstrip(".,;:!?)]")
-    password = next((value for value in password_match.groups() if value is not None), "")
-    payload = json.dumps({"email": email_match.group(0), "password": password}, separators=(",", ":"))
-    return (
-        f"curl -i -X POST {shlex.quote(url)} "
-        f"-H {shlex.quote('Content-Type: application/json')} -d {shlex.quote(payload)}"
-    )
-
-
-def _invocation_end(text: str, opening: int) -> int | None:
-    """Find a function call's closing parenthesis while respecting quoted strings."""
-    depth = 0
-    quote = None
-    escaped = False
-    for index in range(opening, len(text)):
-        char = text[index]
-        if quote:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == quote:
-                quote = None
-        elif char in "'\"":
-            quote = char
-        elif char == "(":
-            depth += 1
-        elif char == ")":
-            depth -= 1
-            if depth == 0:
-                return index
-    return None
-
-
-def _explicit_read_invocation(prompt: str) -> tuple[str, dict] | None:
-    """Parse explicit read-only tool syntax such as git_status(path='.')."""
-    names = ("git_status", "git_diff", "fs_list", "process_list")
-    for name in names:
-        match = re.search(rf"\b{ name }\s*\(", prompt)
-        if not match:
-            continue
-        opening = prompt.find("(", match.start())
-        end = _invocation_end(prompt, opening)
-        if end is None:
-            continue
-        try:
-            call = ast.parse(prompt[match.start():end + 1], mode="eval").body
-            if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Name) or call.func.id != name:
-                continue
-            if call.args:
-                continue
-            arguments = {item.arg: ast.literal_eval(item.value) for item in call.keywords if item.arg}
-            if len(arguments) != len(call.keywords):
-                continue
-            return name, arguments
-        except (SyntaxError, ValueError, TypeError):
-            continue
-    return None
-
-
-def _proposed_terminal_command(text: str, tool_name: str = "terminal_run") -> str | None:
-    """Read a terminal tool snippet from the model's response."""
-    match = re.search(rf"\b{re.escape(tool_name)}\s*\(", text)
-    if not match:
-        return None
-    opening = text.find("(", match.start())
-    end = _invocation_end(text, opening)
-    if end is None:
-        return None
-    body = text[opening + 1:end].strip()
-    if not body:
-        return None
-    try:
-        parsed = ast.parse(f"_call({body})", mode="eval").body
-        if isinstance(parsed, ast.Call):
-            for item in parsed.keywords:
-                if item.arg == "command":
-                    value = ast.literal_eval(item.value)
-                    return value if isinstance(value, str) else None
-    except (SyntaxError, ValueError, TypeError):
-        pass
-    # The local model sometimes prints pseudo-call syntax with raw shell text:
-    # terminal_run(curl -X POST ...). Execution is gated by the user's run/API request.
-    return body
-
 
 @dataclass
 class AgentResult:
@@ -219,7 +64,7 @@ class Agent:
         call_id = f"direct-{len(self.context.messages)}"
         safe_arguments = dict(arguments)
         if isinstance(safe_arguments.get("command"), str):
-            safe_arguments["command"] = _redact_sensitive_text(safe_arguments["command"])
+            safe_arguments["command"] = redact_sensitive_text(safe_arguments["command"])
         call = ToolCall(id=call_id, name=name, arguments=safe_arguments)
         self.context.add(Message(role="assistant", tool_calls=[call]))
         self.on_event("tool_start", {"name": name, "id": call_id, "arguments": safe_arguments})
@@ -232,23 +77,23 @@ class Agent:
         return AgentResult("", 1, 1)
 
     async def run(self, prompt: str) -> AgentResult:
-        curl_command = _curl_login_command(prompt)
+        curl_command = curl_login_command(prompt)
         if curl_command:
-            self.context.add(Message(role="user", content=_redact_sensitive_text(prompt)))
+            self.context.add(Message(role="user", content=redact_sensitive_text(prompt)))
             return await self._dispatch_immediately(
                 "terminal_open", {"command": curl_command, "cwd": "."}
             )
         self.context.add(Message(role="user", content=prompt))
-        explicit_read_call = _explicit_read_invocation(prompt)
+        explicit_read_call = explicit_read_invocation(prompt)
         if explicit_read_call:
             return await self._dispatch_immediately(*explicit_read_call)
 
-        if _RUN_CONFIRMATION.fullmatch(prompt):
+        if RUN_CONFIRMATION.fullmatch(prompt):
             previous_assistant = next(
                 (message.content for message in reversed(self.context.messages[:-1]) if message.role == "assistant"),
                 "",
             )
-            confirmed_command = _proposed_terminal_command(previous_assistant)
+            confirmed_command = proposed_terminal_command(previous_assistant)
             if confirmed_command:
                 return await self._dispatch_immediately(
                     "terminal_open", {"command": confirmed_command, "cwd": "."}
@@ -256,19 +101,19 @@ class Agent:
 
         total_calls = executed_calls = 0
         requires_execution = bool(
-            _ACTION_INTENT.search(prompt) or _EXPLICIT_CHANGE_INTENT.search(prompt)
+            ACTION_INTENT.search(prompt) or EXPLICIT_CHANGE_INTENT.search(prompt)
         )
-        run_request = bool(_RUN_INTENT.search(prompt))
-        curl_request = bool(_CURL_REQUEST_INTENT.search(prompt))
+        run_request = bool(RUN_INTENT.search(prompt))
+        curl_request = bool(CURL_REQUEST_INTENT.search(prompt))
         open_terminal_request = bool(
-            _VISIBLE_TERMINAL_INTENT.search(prompt)
-            or _RUN_FILE_INTENT.search(prompt)
+            VISIBLE_TERMINAL_INTENT.search(prompt)
+            or RUN_FILE_INTENT.search(prompt)
             or curl_request
         )
-        inspection_request = bool(_INSPECT_INTENT.search(prompt))
-        process_list_request = bool(_PROCESS_LIST_INTENT.search(prompt))
-        process_stop_request = bool(_PROCESS_STOP_INTENT.search(prompt))
-        path_request = inspection_request and bool(_PATH_INTENT.search(prompt))
+        inspection_request = bool(INSPECT_INTENT.search(prompt))
+        process_list_request = bool(PROCESS_LIST_INTENT.search(prompt))
+        process_stop_request = bool(PROCESS_STOP_INTENT.search(prompt))
+        path_request = inspection_request and bool(PATH_INTENT.search(prompt))
         failed_calls: set[str] = set()
         had_tool_failure = False
         action_retry_count = 0
@@ -315,8 +160,8 @@ class Agent:
             if not msg.tool_calls:
                 if curl_request or run_request:
                     command = (
-                        _proposed_terminal_command(msg.content, "terminal_open")
-                        or _proposed_terminal_command(msg.content)
+                        proposed_terminal_command(msg.content, "terminal_open")
+                        or proposed_terminal_command(msg.content)
                     )
                     if command:
                         tool_name = "terminal_open" if open_terminal_request else "terminal_run"
